@@ -1,0 +1,996 @@
+---
+title: "doddata"
+author: "Ellie White"
+date: "February 12th, 2019"
+output: html_document
+---
+
+Record of plotting police department purchases through the DOD 1033 program.
+
+# Contents
+1.0 Data Gathering
+2.0 Summary Plots
+3.0 Map Prep
+4.0 Questions
+
+```{r, include=FALSE}
+library(knitr)
+library(formatR)
+opts_chunk$set(
+  fig.width  = 7.5,
+  fig.height = 7.5,
+  collapse   = TRUE,
+  tidy       = FALSE
+)
+
+# # create a .Rprofile file but only create if not already there
+# if(!file.exists("~/.Rprofile")){
+#   file.create("~/.Rprofile")    # (don't overwrite it)
+# } 
+# file.edit("~/.Rprofile")
+```
+
+
+# Citations
+```{r citations}
+# cite R 
+toBibtex(citation())
+
+# cite packages
+citethese <- c("ggplot2", "viridis", "rgeos", "geojsonio", "maptools", "sp", "raster", "rgdal", "tidyverse", "lattice", "RColorBrewer", "Hmisc")
+
+for(i in seq_along(citethese)){
+  x <- citation(citethese[i])
+  print(toBibtex(x))
+}
+
+remove(x)
+remove(i)
+remove(citethese)
+```
+
+
+# 1.0 Data Gathering
+```{r data}
+# data from the Washington Post github repo
+# purchases <- read.csv("inputdata/washingtonpost/1033.csv")
+# code <- read.csv("inputdata/washingtonpost/demil_code_lookup.csv")
+# ic <- read.csv("inputdata/washingtonpost/demil_ic_lookup.csv")
+# quantity <- read.csv("inputdata/washingtonpost/items_by_quantity.csv")
+# stationrecords <- read.csv("inputdata/washingtonpost/records_by_lea.csv")
+# staterecords <- read.csv("inputdata/washingtonpost/records_by_state.csv")
+
+# washington post's dataset was outdated so let's switch to the LESO dataset
+library(readxl)    
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    # I prefer straight data.frames
+    # but if you like tidyverse tibbles (the default with read_excel)
+    # then just pass tibble = TRUE
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+
+mysheets <- read_excel_allsheets("inputdata/lawenforcementsupportoffice/DISP_AllStatesAndTerritories_12312018.xlsx")
+
+# collapse all sheets in one dataframe
+purchases <- do.call(rbind.data.frame, mysheets)
+remove(mysheets)
+
+# clean up rownames
+row.names(purchases) <- 1:nrow(purchases)
+
+# clean up the column names or make new column names, I'm going to make new ones
+# colnames(purchases) <- make.names(colnames(purchases), unique = FALSE, allow_ = TRUE)
+colnames(purchases) <- c("STATEABB", "STATION", "NSN", "ITEM", "QUANTITY", "UI", "VALUE", "DEMIL_CODE", "DEMIL_IC", "SHIPDATE")
+
+# fix date
+purchases$SHIPDATE <- format(purchases$SHIPDATE, "%Y-%m-%d")
+purchases$SHIPDATE <- as.Date(purchases$SHIPDATE, "%Y-%m-%d")
+
+# label the variables in the dataframe for nice labels on plots
+library(Hmisc) 
+varlabels <- c("State Abbreviation", "Station Name", "NSN", "Item Name", "Quantity", "UI", "Acquisition Value", "Demil Code", "Demil IC", "Ship Date")
+names(varlabels) <- names(purchases)
+label(purchases) <- lapply(names(varlabels), function(x) label(purchases[,x]) = varlabels[x])
+
+# find total value
+purchases$TOTALVALUE <- purchases$VALUE*purchases$QUANTITY
+
+# find totals by state and clean up column names if needed
+totalsbystate <- aggregate(TOTALVALUE~STATEABB, purchases, sum)
+staterecords <- aggregate(SHIPDATE~STATEABB, purchases, length)
+colnames(staterecords)[2] <- "RECORDS"
+label(staterecords[,2]) <- "Number of Records"
+
+# # create a column with full state names in case it is needed 
+# purchases$STATENAME <- state.name[match(purchases$STATEABB,state.abb)]
+# totalsbystate$STATENAME<- state.name[match(totalsbystate$STATEABB,state.abb)]
+# staterecords$STATENAME <- state.name[match(staterecords$STATEABB,state.abb)]
+
+# some state names aren't coming in with the code above, so let's fix those manually 
+purchases$STATENAME <- c(state.name, 'District of Columbia', 'Virgin Islands', 'Guam', 'Northern Mariana Islands', 'Puerto Rico' )[match(purchases$STATEABB, c(state.abb, 'DC', 'VI', 'GU', 'MP', 'PR' ))]
+totalsbystate$STATENAME<- c(state.name, 'District of Columbia', 'Virgin Islands', 'Guam', 'Northern Mariana Islands', 'Puerto Rico' )[match(totalsbystate$STATEABB, c(state.abb, 'DC', 'VI', 'GU', 'MP', 'PR' ))]
+staterecords$STATENAME <- c(state.name, 'District of Columbia', 'Virgin Islands', 'Guam', 'Northern Mariana Islands', 'Puerto Rico' )[match(staterecords$STATEABB, c(state.abb, 'DC', 'VI', 'GU', 'MP', 'PR' ))]
+  
+# add state populations, maybe per-capita maps will be useful
+population <- read.csv("inputdata/population/nst-est2018-01.csv", stringsAsFactors=FALSE)
+population <- population[,c(1,12)] # just keep the 2018 data
+population <- population[-c(56:60),] # take out the aggregations
+
+# join the population data
+totalsbystate <- merge(totalsbystate, population, by.x="STATENAME", by.y="LOCATION", all=TRUE) 
+colnames(totalsbystate)[4] <- "POPULATION"
+totalsbystate$VALUEPERCAP <- totalsbystate$TOTALVALUE/totalsbystate$POPULATION
+
+# fix the labels in totals by state
+varlabels <- c("State Name", "State Abbreviation", "Acquisition Value", "Population", "Value Per Capita")
+names(varlabels) <- names(totalsbystate)
+label(totalsbystate) <- lapply(names(varlabels), function(x) label(totalsbystate[,x]) = varlabels[x])
+
+# delte the NAs
+totalsbystate <- na.omit(totalsbystate)
+```
+
+```{r geocoding}
+# # find the lat lon of the police deparmtents 
+# library(googleway)
+# library(ggmap)
+
+# # this sets your google map permanently with write=TRUE. 
+# register_google(key="", write=TRUE)
+# 
+# # do this for unique PDs, cause the full dataset is really long. later you can merge in the geocoding with the station name into the original dataset
+# geocoded <- geocode(unique(purchases$STATION), output = "latlona")
+# geocoded$STATION <- unique(purchases$STATION)
+# write.csv(geocoded, "intdata/stations_geocoded.csv", row.names=FALSE)
+
+geocoded <- read.csv("intdata/stations_geocoded.csv")
+purchases <- merge(purchases, geocoded, by="STATION")
+```
+
+
+# 2.0 Summary Plots
+```{r summary}
+dim(purchases)
+str(purchases)
+head(purchases)
+summary(purchases)
+
+dim(totalsbystate)
+str(totalsbystate)
+head(totalsbystate)
+summary(totalsbystate)
+```
+
+```{r boxplots}
+boxplotlist <- tapply(purchases$TOTALVALUE, purchases$STATEABB, summary)
+boxplot(TOTALVALUE~STATEABB, data=purchases, main="boxplot of acquisitions for each state", xlab="State", ylab="Acquisition Value", col="orange", border="brown")
+```
+
+
+# 3.0 Map Prep
+## 3.1 Geographic Map
+This whole business is to get a nice base map of US states and teritories to plot our data on. help from: https://rud.is/b/2014/11/16/moving-the-earth-well-alaska-hawaii-with-r/
+```{r base_geomap} 
+# boundaries from https://www.census.gov/geo/maps-data/data/cbf/cbf_counties.html download counties or for our case https://www.census.gov/geo/maps-data/data/cbf/cbf_state.html download state boundaries 
+library(raster)
+# usstate <- shapefile("inputdata/usstate5m/cb_2017_us_state_5m.shp")
+# usstate20 <- shapefile("inputdata/usstate20m/cb_2017_us_state_20m.shp")
+usstate <- shapefile("inputdata/usstate500k/cb_2017_us_state_500k.shp")
+
+# transform to albers projection
+library(rgdal)
+albers <- crs("+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs")
+usstate_aea <- spTransform(usstate, albers)
+usstate_aea@data$id <- rownames(usstate_aea@data)
+
+# extract, then rotate, shrink & move the states you want (and reset projection)
+# need to use state IDs via # https://www.census.gov/geo/reference/ansi_statetables.html
+
+library(maptools)
+# extract, then rotate & shift alaska
+alaska <- usstate_aea[usstate_aea$STATEFP=="02",]
+alaska <- elide(alaska, rotate=-50)
+alaska <- elide(alaska, scale=max(apply(bbox(alaska), 1, diff)) / 2.3)
+alaska <- elide(alaska, shift=c(-2100000, -2500000))
+proj4string(alaska) <- proj4string(usstate_aea)
+ 
+# extract, then rotate & shift hawaii
+hawaii <- usstate_aea[usstate_aea$STATEFP=="15",]
+hawaii <- elide(hawaii, rotate=-35)
+hawaii <- elide(hawaii, shift=c(5400000, -1400000))
+proj4string(hawaii) <- proj4string(usstate_aea)
+
+# extract, then rotate & shift puerto rico
+puertorico <- usstate_aea[usstate_aea$STATEFP=="72",]
+puertorico <- elide(puertorico, rotate=0)
+puertorico <- elide(puertorico, shift=c(-2400000, 0))
+proj4string(puertorico) <- proj4string(usstate_aea)
+
+# extract, then rotate & shift the virgin islands
+virginislands <- usstate_aea[usstate_aea$STATEFP=="78",]
+virginislands <- elide(virginislands, rotate=0)
+virginislands <- elide(virginislands, shift=c(-2400000, 0))
+proj4string(virginislands) <- proj4string(usstate_aea)
+
+# extract, then rotate & shift the Guam
+guam <- usstate_aea[usstate_aea$STATEFP=="66",]
+guam <- elide(guam, rotate=0)
+guam <- elide(guam, shift=c(8500000, -7000000))
+proj4string(guam) <- proj4string(usstate_aea)
+
+# extract, then rotate & shift Northern Mariana Islands
+marinaislands <- usstate_aea[usstate_aea$STATEFP=="69",]
+marinaislands <- elide(marinaislands, rotate=0)
+marinaislands <- elide(marinaislands, shift=c(8500000, -7000000))
+proj4string(marinaislands) <- proj4string(usstate_aea)
+
+# 02|AK|Alaska|01785533                       add back in 
+# 11|DC|District of Columbia|01702382         remove
+# 15|HI|Hawaii|01779782                       remove
+# 66|GU|Guam|01802705                         add back in 
+# 69|MP|Northern Mariana Islands|01779809     add back in 
+# 72|PR|Puerto Rico|01779808                  add back in 
+# 78|VI|U.S. Virgin Islands|01802710          add back in
+# 60|AS|American Samoa|01802701               remove
+# 74|UM|U.S. Minor Outlying Islands|01878752  remove
+# remove old states and put new ones back in; we're also removing the teritories listed above
+usstate_main <- usstate_aea[!usstate_aea$STATEFP %in% c("02", "11", "15", "72", "78", "60", "74", "69", "66"),]
+usstate_altered <- rbind(usstate_main, alaska, puertorico, virginislands, guam, marinaislands)
+
+plot(usstate_altered)
+```
+
+## 3.2 A Hexbin Map
+This may be a better visual tool, used code from tutorial at: https://www.r-graph-gallery.com/328-hexbin-map-of-the-usa/
+```{r base_hexbinmap} 
+library(tidyverse)
+library(dplyr) 
+ 
+# Hexbin download available in the geojson format here: https://team.carto.com/u/andrew/tables/andrew.us_states_hexgrid/public/map. download it and then bring it in
+library(geojsonio)
+spdf <- geojson_read("inputdata/hexgridmap/us_states_hexgrid.geojson",  what = "sp")
+ 
+# need to 'fortify' the data to be able to show it with ggplot2 (we need a data frame format)
+library(broom)
+spdf@data <- spdf@data %>% mutate(google_name = gsub(" \\(United States\\)", "", google_name))
+spdf_fortified <- tidy(spdf, region = "google_name")
+
+# calculate the centroid of each hexagon to add the label
+library(rgeos)
+centers <- cbind.data.frame(data.frame(gCentroid(spdf, byid=TRUE), id=spdf@data$iso3166_2))
+
+library(ggplot2)
+# now I can plot this shape easily as described before
+ggplot() +
+  geom_polygon(data = spdf_fortified, aes( x = long, y = lat, group = group), fill="skyblue", color="white") +
+  geom_text(data=centers, aes(x=x, y=y, label=id)) +
+  theme_void() +
+  coord_map()
+
+# merge geospatial and numerical information
+spdf_fortified <- spdf_fortified %>% left_join(. , totalsbystate, by=c("id"="STATENAME")) 
+
+# NAs were introduced because of district of columbia, let's just drop them for now
+spdf_fortified <- na.omit(spdf_fortified)
+ 
+# Make a first base chloropleth map
+ggplot() +
+  geom_polygon(data=spdf_fortified, aes(fill=TOTALVALUE, x=long, y=lat, group=group)) +
+  theme_void() +
+  coord_map()
+
+# this is not too bad, but quite disappointing in the color ramp, our outlier states somewhat  absorb all the variation on the rest of the map. use binning to fix this issue.
+```
+
+## 3.3 Counties Map
+```{r base_counties_map}
+# install using devtools::install_github("UrbanInstitute/urbnmapr")
+library(urbnmapr)
+library(tidyverse)
+
+states %>%
+  ggplot(aes(long, lat, group = group)) +
+  geom_polygon(fill = "grey", color = "#ffffff", size = 0.25) +
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45)
+
+# with labels
+states %>%
+  ggplot() +
+  geom_polygon(aes(long, lat, group = group), 
+               fill = "grey", color = "#ffffff", size = 0.25) +
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  geom_text(data = get_urbn_labels(map = "states"), aes(x = long, lat, label = state_abbv), 
+            size = 3)
+# counties
+counties %>%
+  ggplot(aes(long, lat, group = group)) +
+  geom_polygon(fill = "grey", color = "#ffffff", size = 0.05) +
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45)
+
+territories_counties <- get_urbn_map(map = "territories_counties")
+territories_counties %>%
+  ggplot(aes(long, lat, group = group)) +
+  geom_polygon(fill = "grey", color = "#ffffff", size = 0.05) +
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45)
+
+# orrrrr use the get_urbn_map functions
+territories <- get_urbn_map(map = "territories")
+labels <- get_urbn_labels(map = "territories")
+
+territories %>%
+  ggplot() +
+  geom_polygon(aes(long, lat, group = group),
+               fill = "grey", color = "#ffffff", size = 0.05) +
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  geom_text(data = labels, aes(x = long, lat, label = state_abbv), size = 3) 
+
+# # example merging in data with left_join
+# statedata %>% 
+#   left_join(states, by = "state_name") %>% 
+#   ggplot(mapping = aes(long, lat, group = group, fill = horate)) +
+#   geom_polygon(color = "#ffffff", size = .25) +
+#   coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+#   labs(fill = "Homeownership rate")
+# 
+# # example this is what we want our map to look like
+# household_data <- left_join(countydata, counties, by = "county_fips") 
+# 
+# household_data %>%
+#   ggplot(aes(long, lat, group = group, fill = medhhincome)) +
+#   geom_polygon(color = NA) +
+#   coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+#   labs(fill = "Median Household Income")
+```
+
+
+# 4.0 Questions
+
+## 4.1 Which states/counties/locations aquired the most in value?
+```{r Q1_dotchart} 
+# first a dotchart
+sum(is.na(totalsbystate))
+totalsbystate_reordered <- totalsbystate[order(totalsbystate$TOTALVALUE, decreasing=FALSE),]
+dotchart(as.numeric(totalsbystate_reordered[,"TOTALVALUE"]), labels=totalsbystate_reordered[,"STATEABB"], cex = 0.6, xlab = "Acquisition Value", ylab="", pch=19)
+```
+
+```{r Q1_geomap}
+# merge should be done on the SPDF itself rather than SPDF@data, otherwise it will jumble up the states, even ordering by the state abbreviation column and doing a cbind does that too
+usstate_altered <- merge(usstate_altered, totalsbystate, by.x="STUSPS", by.y="STATEABB")
+
+# quick check to see if the states are jumbled or not 
+plot(usstate_altered[usstate_altered@data$STUSPS=="CA",])
+
+library(viridis)
+
+png("outputdata/q1_value_states_spplot.png",units="in", width=8, height=5, res=300)
+# title of legend not working right
+# list(space="right", title = "Total \nAcquisition \nValue (M$)")
+my_palette <- colorRampPalette(c("mistyrose", "darkred"))(100)
+spplot(usstate_altered, "TOTALVALUE", col.regions = my_palette, col=NA, par.settings = list(panel.background=list(col="grey95"), axis.line = list(col = 'transparent')), colorkey = TRUE)
+dev.off()
+
+tbstate <- left_join(states, usstate_altered@data, by = c("state_fips" = "STATEFP"))
+
+png("outputdata/q1_value_states_ggplot.png",units="in", width=8, height=5, res=300)
+tbstate %>%
+  ggplot(aes(long, lat, group = group, fill = TOTALVALUE/1e6)) +
+  geom_polygon(color = NA) +
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  scale_fill_gradient(labels = scales::dollar, na.value = "white", 
+                      low="mistyrose", high="darkred", trans="log10") +
+  labs(fill = "Total \nAcquisition \nValue (M$)") 
+dev.off()
+```
+
+```{r Q1_hexmap}
+png("outputdata/q1_value_states_hexbin.png",units="in", width=8, height=5, res=300)
+ggplot() +
+  geom_polygon(data=spdf_fortified, aes(fill=TOTALVALUE/1e6, x=long, y=lat, group=group), size=0, alpha=0.9) +
+  geom_text(data=centers, aes(x=x, y=y, label=id), color="white", size=3, fontface = "bold") +
+  theme_void() +
+  scale_fill_gradient(
+    labels = scales::dollar, na.value = "white", low="mistyrose", 
+    high="darkred", trans="log10", name="Total Acquisition Value (M$)", 
+    guide = guide_colourbar(direction = "horizontal", label.position = "bottom", title.position = 'top', nrow=1, barheight = unit(5, units = "mm"), barwidth=unit(60, units = "mm"))
+    ) +
+  theme(
+    legend.position = c(0.5, 0.9),
+    text = element_text(color = "#22211d"),
+    plot.background = element_rect(fill = "white", color = NA), 
+    panel.background = element_rect(fill = "grey95", color = NA), 
+    legend.background = element_rect(fill = "grey95", color = NA),
+    plot.title = element_text(size= 22, hjust=0.5, color = "#4e4d47", margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm"))) +
+  coord_map() # somehow fixes the hexagons
+dev.off()
+```
+
+```{r Q1_countiesmap}  
+# make purchases as point data 
+# first have to delete the NAs where the google API could not find an address
+sum(is.na(purchases$lat))/dim(purchases)[1]*100 # percentage of data loss
+sppurchases <- purchases[!is.na(purchases$lat), ]
+coordinates(sppurchases) <- ~lon + lat
+proj4string(sppurchases) <- CRS("+proj=longlat +datum=WGS84")
+
+# get county polygons in
+spcounty <- shapefile("inputdata/us county tigerline/tl_2016_us_county.shp")
+spcounty <- spTransform(spcounty, crs(sppurchases))
+spcounty$FIPS <- paste0(spcounty$STATEFP, spcounty$COUNTYFP) # make a count_fips column
+
+# find the county that the police departments are in
+sppurchases$COUNTY <- over(sppurchases, spcounty)$NAMELSAD
+sppurchases$FIPS <- over(sppurchases, spcounty)$FIPS
+
+# aggregate the total value of acquisitions by county
+totalsbycounty <- aggregate(TOTALVALUE~FIPS, sppurchases@data, sum)
+
+# join in the data
+spcounty <- merge(spcounty, totalsbycounty, by="FIPS", all=TRUE)
+
+# county map
+# join into the spatial dataframe (here it is a tibble)
+tbcounty <- left_join(counties, spcounty@data, by = c("county_fips" = "FIPS"))
+
+png("outputdata/q1_value_counties.png",units="in", width=8, height=5, res=300)
+tbcounty %>%
+  ggplot(aes(long, lat, group = group, fill = TOTALVALUE/1e6)) +
+  geom_polygon(color = NA) +
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  scale_fill_gradient(labels = scales::dollar, na.value = "white", low="mistyrose", high="darkred", trans="log10") +
+  labs(fill = "Total \nAcquisition \nValue (M$)")
+dev.off()
+```
+
+```{r Q1_point_pattern_map} 
+# aggregate (or sum) the point data in purchases to each department
+totalsbystation <- aggregate(TOTALVALUE~STATION, sppurchases@data, sum)
+colnames(totalsbystation)[2] <- "TOTALVALUESTATION"
+spstation <- merge(sppurchases, totalsbystation, by="STATION", all=TRUE)
+spstation <- spstation[!duplicated(spstation$STATION),] # collapse the same stations
+
+spstation <- spTransform(spstation, albers)
+
+summary(spstation$TOTALVALUESTATION)
+breaks <- seq(0,80e6,15e6)
+
+png("outputdata/q1_value_stations_bubble.png",units="in", width=8, height=5, res=300)
+spstationcrop <- crop(spstation, extent(spTransform(usstate, albers)))
+bubble(spstationcrop, "TOTALVALUESTATION", maxsize=2, sp.layout=list(spTransform(usstate, albers), fill="white"), key.entries = breaks, alpha=0.5, col=c("darkred"), main="", par.settings = list(panel.background=list(col="grey95"), axis.line = list(col = 'transparent')))
+# auto.key=list(padding.text=40)
+dev.off()
+
+# crop to contiguous us boundary
+png("outputdata/q1_value_stations_crop.png",units="in", width=8, height=5, res=300)
+spstationcrop <- crop(spstation, extent(usstate_altered))
+bubble(spstationcrop, "TOTALVALUESTATION", maxsize=4, key.entries=breaks, sp.layout=list(spTransform(usstate, albers), fill="white"), alpha=0.5, col=c("darkred"), main="", key.space ="right", par.settings = list(panel.background=list(col="grey95"), axis.line = list(col = 'transparent')))
+dev.off()
+
+png("outputdata/q1_value_stations_crop_ggplot.png",units="in", width=8, height=5, res=300)
+spstationcrop <- crop(spstation, extent(usstate_altered))
+ftstation <- fortify(cbind(spstationcrop@data, long=spstationcrop@coords[,1], lat=spstationcrop@coords[,2]))
+ftusstate_main <- fortify(usstate_main, region="NAME")
+ftstation %>%
+  ggplot() +
+  geom_polygon(data = ftusstate_main, aes(x=long, y=lat, group=group), fill = "white", color = "black", size=0.1) +
+  geom_point(aes(x=long, y=lat, size =TOTALVALUESTATION/1e6), color="darkred", alpha=0.5) +
+  # coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  scale_fill_gradient(labels = scales::dollar, trans="log10") +
+  scale_size_area(max_size = 10) +
+  labs(size = "Total \nAcquisition \nValue (M$)") 
+dev.off()
+
+# do the same transformations we did for the base map here
+# extract, then rotate & shift alaska
+alaska <- spstation[spstation$STATEABB=="AK",]
+alaska <- elide(alaska, rotate=-50)
+alaska <- elide(alaska, scale=max(apply(bbox(alaska), 1, diff)) / 2.3)
+alaska <- elide(alaska, shift=c(-2100000, -2500000))
+proj4string(alaska) <- proj4string(spstation)
+ 
+# # extract, then rotate & shift hawaii, hawaii doesn't have any data
+# hawaii <- spstation[spstation$STATEABB=="HI",]
+# hawaii <- elide(hawaii, rotate=-35)
+# hawaii <- elide(hawaii, shift=c(5400000, -1400000))
+# proj4string(hawaii) <- proj4string(spstation)
+
+# extract, then rotate & shift puerto rico
+puertorico <- spstation[spstation$STATEABB=="PR",]
+puertorico <- elide(puertorico, rotate=0)
+puertorico <- elide(puertorico, shift=c(-2400000, 0))
+proj4string(puertorico) <- proj4string(spstation)
+
+# extract, then rotate & shift the virgin islands
+virginislands <- spstation[spstation$STATEABB=="VI",]
+virginislands <- elide(virginislands, rotate=0)
+virginislands <- elide(virginislands, shift=c(-2400000, 0))
+proj4string(virginislands) <- proj4string(spstation)
+
+# extract, then rotate & shift the Guam
+guam <- spstation[spstation$STATEABB=="GU",]
+guam <- elide(guam, rotate=0)
+guam <- elide(guam, shift=c(8500000, -7000000))
+proj4string(guam) <- proj4string(spstation)
+
+# extract, then rotate & shift Northern Mariana Islands
+marinaislands <- spstation[spstation$STATEABB=="MP",]
+marinaislands <- elide(marinaislands, rotate=0)
+marinaislands <- elide(marinaislands, shift=c(8500000, -7000000))
+proj4string(marinaislands) <- proj4string(spstation)
+
+# 02|AK|Alaska|01785533                       add back in 
+# 11|DC|District of Columbia|01702382         remove
+# 15|HI|Hawaii|01779782                       remove
+# 66|GU|Guam|01802705                         add back in 
+# 69|MP|Northern Mariana Islands|01779809     add back in 
+# 72|PR|Puerto Rico|01779808                  add back in 
+# 78|VI|U.S. Virgin Islands|01802710          add back in
+# 60|AS|American Samoa|01802701               remove
+# 74|UM|U.S. Minor Outlying Islands|01878752  remove
+# remove old states and put new ones back in; we're also removing the teritories listed above
+spstation <- spstation[!spstation$STATEABB %in% c("AK", "DC", "PR", "VI", "AS", "UM", "NP", "GU"),]
+spstation <- rbind(spstation, alaska, puertorico, virginislands, guam, marinaislands)
+
+# plot the point data, Alaska points are not in the right spot!!!
+png("outputdata/q1_value_stations_altered.png",units="in", width=8, height=5, res=300)
+spstationcrop <- crop(spstation, extent(usstate_altered))
+bubble(spstationcrop, "TOTALVALUESTATION", maxsize=4, key.entries=breaks, sp.layout=list(usstate_altered, fill="white"), alpha=0.5, col=c("darkred"), main="", key.space ="right", par.settings = list(panel.background=list(col="grey95"), axis.line = list(col = 'transparent')))
+dev.off()
+```
+
+```{r Q1_gif} 
+# plot the point data by year (cumulated) to make a gif
+totalsbystationyear <- data.frame() # empty vector 
+for (i in unique(sppurchases$STATION)){
+  subset <- sppurchases[sppurchases$STATION==i,]
+  # in case it's not ordered, order subset by date
+  subset <- subset[order(as.Date(subset$SHIPDATE, format="%Y-%m-%d")),]
+  subset$YEAR <- as.numeric(format(subset$SHIPDATE,'%Y'))
+  
+  # aggregate by each year
+  subtotals <- aggregate(TOTALVALUE~YEAR, subset@data, sum)
+  subtotals$STATION <- i
+  subtotals$CUMUL <- cumsum(subtotals$TOTALVALUE)
+  totalsbystationyear <- rbind(totalsbystationyear, subtotals)
+}
+
+totalsbystationyear <- merge(totalsbystationyear, geocoded, by="STATION")
+
+# make a spatial version
+sptotalsbystationyear <- totalsbystationyear
+coordinates(sptotalsbystationyear) <- ~lon + lat
+proj4string(sptotalsbystationyear) <- CRS("+proj=longlat +datum=WGS84")
+sptotalsbystationyear <- spTransform(sptotalsbystationyear, albers)
+
+# ggplot all the plots needed for the gif
+# fix the coordinates too 
+# > min(ftstation$long)
+# [1] -1951659
+# > max(ftstation$long)
+# [1] 2396748
+# > min(ftstation$lat)
+# [1] -2094712
+# > max(ftstation$lat)
+# [1] 697699.2
+
+for (i in min(sptotalsbystationyear$YEAR):max(sptotalsbystationyear$YEAR)){
+  subset <- sptotalsbystationyear[sptotalsbystationyear$YEAR==i,]
+  spstationcrop <- crop(subset, extent(usstate_altered))
+  ftstation <- fortify(cbind(spstationcrop@data, long=spstationcrop@coords[,1], lat=spstationcrop@coords[,2]))
+  ftusstate_main <- fortify(usstate_main, region="NAME")
+  gg <- ftstation %>%
+    ggplot() +
+    geom_polygon(data = ftusstate_main, aes(x=long, y=lat, group=group), fill = "white", color = "black", size=0.1) +
+    geom_point(aes(x=long, y=lat, size =CUMUL/1e6), color="darkred", alpha=0.5) +
+    # coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+    # scale_fill_gradient(labels = scales::dollar, trans="log10") +
+    # scale_size_area(breaks = seq(0,75,5),  max_size = 10 ) +
+    scale_size_continuous(labels = scales::dollar, trans="log10", limits=c(0.01, 76)) +
+    labs(size = paste0(i, "\nTotal \nAcquisition \nValue (M$)")) +
+    coord_fixed(ratio = 1, xlim=c(-1951659, 2396748), ylim=c(-2094712, 697699.2), expand = TRUE, clip = "on") 
+  png(paste0("outputdata/gif/cumulative_upto",i , ".png"),units="in", width=8, height=5, res=300)
+  print(gg)
+  dev.off()
+}
+
+library(magick)
+library(purrr)
+
+list.files(path = "outputdata/gif/", pattern = "*.png", full.names = T) %>% 
+  map(image_read) %>% # reads each path file
+  image_join() %>% # joins image
+  image_animate(fps=1) %>% # animates, can opt for number of loops
+  image_write("outputdata/cumulative_value.gif") # write to current dir
+```
+
+```{r Q1_knnmap}
+# # make a voronoi map
+# library(dismo)
+# v <- voronoi(spstation)
+# usstate <- spTransform(usstate, crs(spstation))
+# vca <- intersect(v, usstate)
+# spplot(vca, 'TOTALVALUESTATION')
+# # rasterize
+# r <- raster(usstate, res=10000)
+# vr <- rasterize(vca, r, 'TOTALVALUESTATION')
+# 
+# plot(vr)
+```
+
+## 4.2 Which states aquired the most in value per capita?
+```{r Q2} 
+png("outputdata/q2_value_per_cap.png",units="in", width=8, height=5, res=300)
+ggplot() +
+  geom_polygon(data=spdf_fortified, aes(fill=VALUEPERCAP, x=long, y=lat, group=group), size=0, alpha=0.9) +
+  geom_text(data=centers, aes(x=x, y=y, label=id), color="white", size=3, fontface = "bold") +
+  theme_void() +
+  scale_fill_gradient(
+    labels = scales::dollar, na.value = "white", low="mistyrose", 
+    high="darkred", trans="log10", name="Total Per Capita Acquisition Value (M$)", 
+    guide = guide_colourbar(direction = "horizontal", label.position = "bottom", title.position = 'top', nrow=1, barheight = unit(5, units = "mm"), barwidth=unit(70, units = "mm"))
+    ) +
+  theme(
+    legend.position = c(0.5, 0.9),
+    text = element_text(color = "#22211d"),
+    plot.background = element_rect(fill = "white", color = NA), 
+    panel.background = element_rect(fill = "grey95", color = NA), 
+    legend.background = element_rect(fill = "grey95", color = NA),
+    plot.title = element_text(size= 22, hjust=0.5, color = "#4e4d47", margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm"))) +
+  coord_map() # somehow fixes the hexagons
+dev.off()
+```
+
+```{r Q2_barplot}
+totalsbystate_reordered$MY_PALETTE <-  colorRampPalette(c("mistyrose", "darkred"))(53)
+totalsbystate_reordered2 <- totalsbystate_reordered[order(totalsbystate_reordered$VALUEPERCAP, decreasing=TRUE),]
+totalsbystate_reordered2$CUMULPOP <- cumsum(totalsbystate_reordered2$POPULATION)
+totalsbystate_matrix <- as.matrix(totalsbystate_reordered2[, c("POPULATION", "VALUEPERCAP", "CUMULPOP")])
+
+png("outputdata/q2_value_per_cap_barplot.png",units="in", width=16, height=10, res=300)
+barplot(totalsbystate_matrix[,2], totalsbystate_matrix[,1], names.arg=round(totalsbystate_matrix[,3]/1e6, 0), space=0, ylab="Total Acquisition Value Per Capita ($/person)", xlab="Cumulative Population (Millions)", col=totalsbystate_reordered2$MY_PALETTE, ylim=c(0, 21))
+text(totalsbystate_matrix[,3], totalsbystate_matrix[,2], totalsbystate_reordered2$STATEABB, cex=0.8, pos=4, offset=0.1)
+dev.off()
+```
+
+## 4.3 Are the acquizitions hapenning in places with more people of color?
+```{r Q3_scatter} 
+# bring in population data by demographics
+race <- read.csv("inputdata/demographics/populationdistbyrace.csv")
+
+# delete the Total column, it's redundant
+race <- race[,-9]
+
+# let's consider POC: anything but white
+race$POC <- 1-race$WHITE
+colnames(race)[1] <- "STATENAME"
+totalsbystate <- merge(totalsbystate, race, by="STATENAME")
+
+# let's scatter plot to see if there's a relationship
+png("outputdata/q3_scatter_poc_value.png",units="in", width=16, height=10, res=300)
+plot(totalsbystate$POC, totalsbystate$TOTALVALUE/1e6, xlab="Percent People of Color In Each State", ylab="Total Police Acquisitions (M$)", xlim=c(0,0.9), ylim=c(0,300))
+text(totalsbystate$POC, totalsbystate$TOTALVALUE/1e6, labels = totalsbystate$STATEABB, pos = 4)
+linearmodel <- lm(totalsbystate$TOTALVALUE/1e6~totalsbystate$POC)
+abline(linearmodel, col="red")
+coefs <- coef(linearmodel)
+b0 <- round(coefs[1], 2)
+b1 <- round(coefs[2],2)
+r2 <- round(summary(linearmodel)$r.squared, 2)
+mylabel <- bquote(italic(y) == .(b0) + .(b1)*italic(x)* ","  ~~ italic(r)^2 == .(r2))
+text(x = 0.75, y = 295, labels = mylabel, pos=4, col="red")
+dev.off()
+
+# let's try with log y axis 
+png("outputdata/q3_scatter_poc_value_logy.png",units="in", width=16, height=10, res=300)
+plot(totalsbystate$POC, totalsbystate$TOTALVALUE/1e6, log='y', xlab="Percent People of Color In Each State", ylab="Total Police Acquisitions (M$)", xlim=c(0,0.9), panel.first=c(abline(h=c(seq(1e-1, 1e+1, 1), seq(1e+1, 1e+3, 1e+2)), lty=3, col="grey"),abline(v=seq(0,1,0.2), lty=3, col="grey")))
+text(totalsbystate$POC, totalsbystate$TOTALVALUE/1e6, labels = totalsbystate$STATEABB, pos = 4)
+linearmodel <- lm(totalsbystate$TOTALVALUE/1e6~totalsbystate$POC)
+abline(linearmodel, untf=TRUE, col="red")
+coefs <- coef(linearmodel)
+b0 <- round(coefs[1], 2)
+b1 <- round(coefs[2],2)
+r2 <- round(summary(linearmodel)$r.squared, 2)
+mylabel <- bquote(italic(y) == .(b0) + .(b1)*italic(x)* ","  ~~ italic(r)^2 == .(r2))
+text(x = 0.75, y = 295, labels = mylabel, pos=4, col="red")
+dev.off()
+
+# now let's try log transforming the data
+png("outputdata/q3_scatter_poc_logvalue.png",units="in", width=16, height=10, res=300)
+plot(totalsbystate$POC, log(totalsbystate$TOTALVALUE/1e6), xlab="Percent People of Color In Each State", ylab="Log Total Police Acquisitions (M$)", xlim=c(0,0.9))
+text(totalsbystate$POC, log(totalsbystate$TOTALVALUE/1e6), labels = totalsbystate$STATEABB, pos = 4)
+linearmodel <- lm(log(totalsbystate$TOTALVALUE/1e6)~totalsbystate$POC)
+abline(linearmodel, col="red")
+coefs <- coef(linearmodel)
+b0 <- round(coefs[1], 2)
+b1 <- round(coefs[2],2)
+r2 <- round(summary(linearmodel)$r.squared, 2)
+mylabel <- bquote("log(" *italic(y)* ")" == .(b0) + .(b1)*italic(x)* ","  ~~ italic(r)^2 == .(r2))
+text(x = 0.75, y = 5, labels = mylabel, pos=4, col="red")
+dev.off()
+```
+
+```{r Q3_hexmap}
+totalsbystate$VALUEPERPOCCAP <- totalsbystate$TOTALVALUE/(totalsbystate$POC*totalsbystate$POPULATION)
+spdf_fortified <- spdf_fortified %>% left_join(. , totalsbystate[,c("STATENAME", "VALUEPERPOCCAP")], by=c("id"="STATENAME")) 
+
+png("outputdata/q3_value_per_poc_capita.png",units="in", width=8, height=5, res=300)
+ggplot() +
+  geom_polygon(data=spdf_fortified, aes(fill=VALUEPERPOCCAP, x=long, y=lat, group=group), size=0, alpha=0.9) +
+  geom_text(data=centers, aes(x=x, y=y, label=id), color="white", size=3, fontface = "bold") +
+  theme_void() +
+  scale_fill_gradient(
+    labels = scales::dollar, na.value = "white", low="mistyrose", 
+    high="darkred", trans="log10", name="Total Per POC Capita Acquisition Value (M$)", 
+    guide = guide_colourbar(direction = "horizontal", label.position = "bottom", title.position = 'top', nrow=1, barheight = unit(5, units = "mm"), barwidth=unit(78, units = "mm"))
+    ) +
+  theme(
+    legend.position = c(0.5, 0.9),
+    text = element_text(color = "#22211d"),
+    plot.background = element_rect(fill = "white", color = NA), 
+    panel.background = element_rect(fill = "grey95", color = NA), 
+    legend.background = element_rect(fill = "grey95", color = NA),
+    plot.title = element_text(size= 22, hjust=0.5, color = "#4e4d47", margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm"))) +
+  coord_map() # somehow fixes the hexagons
+dev.off()
+```
+
+## 4.4 How many items did each state get?
+```{r Q4}
+# first a dotchart
+staterecords_reordered <- staterecords[order(staterecords$RECORDS, decreasing=FALSE),]
+dotchart(staterecords_reordered[,2], labels=staterecords_reordered[,1], cex = 0.6, xlab = "Number of Records", ylab="", pch=19)
+
+# now a map
+spdf_fortified <- spdf_fortified %>% left_join(. , staterecords[,c("STATENAME", "RECORDS")], by=c("id"="STATENAME"))
+
+png("outputdata/q4_records.png",units="in", width=8, height=5, res=300)
+ggplot() +
+  geom_polygon(data=spdf_fortified, aes(fill=as.numeric(RECORDS), x=long, y=lat, group=group), size=0, alpha=0.9) +
+  geom_text(data=centers, aes(x=x, y=y, label=id), color="white", size=3, fontface = "bold") +
+  theme_void() +
+  scale_fill_gradient(na.value = "white", low="mistyrose", 
+    high="darkred", name="Total Number of Records", 
+    guide = guide_colourbar(direction = "horizontal", label.position = "bottom", title.position = 'top', nrow=1, barheight = unit(5, units = "mm"), barwidth=unit(60, units = "mm"))
+    ) +
+  theme(
+    legend.position = c(0.5, 0.9),
+    text = element_text(color = "#22211d"),
+    plot.background = element_rect(fill = "white", color = NA), 
+    panel.background = element_rect(fill = "grey95", color = NA), 
+    legend.background = element_rect(fill = "grey95", color = NA),
+    plot.title = element_text(size= 22, hjust=0.5, color = "#4e4d47", margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm"))) +
+  coord_map() # somehow fixes the hexagons
+dev.off()
+```
+
+## 4.5 What items was sent the most?
+```{r Q5}
+# this piece of code was for the previous Washingtop Post data
+# quantity <- na.omit(quantity)
+# quantity <- quantity[order(quantity$QUANTITY, decreasing=TRUE),]
+# dotchart(quantity[20:1,2], labels = quantity[20:1,1], cex = 0.6, xlab = "Number of Items", ylab="", pch=19)
+
+quantity <- aggregate(QUANTITY~ITEM, purchases, sum)
+quantity <- quantity[order(quantity$QUANTITY, decreasing=TRUE),]
+dotchart(quantity[20:1,2], labels = quantity[20:1,1], cex = 0.6, xlab = "Number of Items", ylab="", pch=19)
+```
+
+## 4.6 What items where each state getting?
+```{r Q6}
+# data by item, theres a lot of them so this table is going to be wide
+totalsbyitem <- aggregate(QUANTITY~STATEABB+ITEM, purchases, sum)
+library(reshape2)
+totalsbystateitem <- dcast(melt(totalsbyitem, id.vars=c("STATEABB", "ITEM"), variable.name="QUANTITY"), STATEABB~QUANTITY+ITEM)
+names(totalsbystateitem) <- make.names(names(totalsbystateitem), unique=TRUE)
+
+## order the columns by the CA most to least aquired equipment
+# totalsbystateitem <- totalsbystateitem[,order(totalsbystateitem[totalsbystateitem$STATEABB=="CA",], decreasing = TRUE)]
+
+# order by the average of the quantity aquired, not just one state
+totalsbystateitem <- totalsbystateitem[,order(colMeans(totalsbystateitem[2:ncol(totalsbystateitem)], na.rm=TRUE), decreasing = TRUE)]
+
+totalsbystateitem$STATENAME <- state.name[match(totalsbystateitem$STATEABB,state.abb)]
+
+# join the tables
+spdf_fortified_wide <- spdf_fortified
+spdf_fortified_wide <- spdf_fortified_wide %>% left_join(. , totalsbystateitem, by=c("id"="STATENAME"))
+summary(spdf_fortified_wide$QUANTITY_CABLE.RADIO.FREQUENCY)
+spdf_fortified_wide$bin4 <- cut(spdf_fortified_wide$QUANTITY_CABLE.RADIO.FREQUENCY , breaks=seq(0,3000,500), labels=c("0-500", "500-1000", "1000-1500", "1500-2000", "2000-2500", "2500-3000"), include.lowest = TRUE )
+  
+my_palette=rev(magma(8))[c(-1,-8)]
+
+# evetually put this in a loop to produce a map for maybe the first 20 of the 7565 items. Or plot the most interesting items. Ask others what those could be. 
+png("outputdata/byitem/q6_items_by_state.png",units="in", width=8, height=5, res=300)
+ggplot() +
+  geom_polygon(data=spdf_fortified_wide, aes(fill=bin4, x=long, y=lat, group=group), size=0, alpha=0.9) +
+  geom_text(data=centers, aes(x=x, y=y, label=id), color="white", size=3, alpha=0.6) +
+  theme_void() +
+  scale_fill_manual(
+    values=my_palette,
+    name="No. of this Item Acquired",
+    guide = guide_legend(keyheight = unit(3, units = "mm"), keywidth=unit(12, units = "mm"), label.position = "bottom", title.position = 'top', nrow=1)
+  ) +
+  ggtitle("Police Acquisitions of Cable Radio Frequency Devices") +
+  theme(
+    legend.position = c(0.5, 0.9),
+    text = element_text(color = "#22211d"),
+    plot.background = element_rect(fill = "#f5f5f2", color = NA),
+    panel.background = element_rect(fill = "#f5f5f2", color = NA),
+    legend.background = element_rect(fill = "#f5f5f2", color = NA),
+    plot.title = element_text(size= 18, hjust=0.5, color = "#4e4d47", margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm"))) +
+  coord_map() # somehow fixes the hexagons
+dev.off()
+```
+
+## 4.7 Does the amount of acquizitions correlate with the number of police homocides?
+```{r Q7_data}
+# possible data sources (TBD): These were inaccessible at the time 02/17/2019 
+# 1) National Violent Death Reporting System: The CDC established the NVDRS in 2003; it captures all deaths in participating states that result from homicide, suicide, legal intervention (excluding legal execution), unintentional shooting, and injuries of unknown intent
+# 2) Vital Statistics: The CDC’s National Center for Health Statistics assembles Vital Statistics mortality data, which are derived from the death certificate
+# 3) Supplementary Homicide Reports: SHRs are supplemental reports that local police and sheriffs’ departments provide to the FBI as part of the voluntary Uniform Crime Reports system
+
+# # using Washington Post's 2015-01-02- 2019-02-11 data we have: 
+# shootings <- read.csv("inputdata/shootings/fatal-police-shootings-data.csv")
+# shootings$date <- as.Date(shootings$date, "%Y-%m-%d")
+#   
+# shootingsbystate <- aggregate(cbind(count = date) ~ state, data = shootings, FUN = function(x){NROW(x)})
+
+# using Mapping Police Violence data we have:
+shootings <- read.csv("inputdata/mappingpoliceviolence/wholedataset.csv")
+shootings$DATE <- as.Date(shootings$DATE, "%m/%d/%Y")
+
+shootingsbystate <- read.csv("inputdata/mappingpoliceviolence/mpvbystate.csv")
+shootingsbystate$STATEABB <- c(state.abb, 'DC', 'VI', 'GU', 'MP', 'PR' )[match(shootingsbystate$STATE, c(state.name, 'District of Columbia', 'Virgin Islands', 'Guam', 'Northern Mariana Islands', 'Puerto Rico' ))]
+  
+shootingsbystate_reordered <- shootingsbystate[order(shootingsbystate$NO_OF_PEOPLE_KILLED, decreasing=FALSE),]
+dotchart(shootingsbystate_reordered[,"NO_OF_PEOPLE_KILLED"], labels=shootingsbystate_reordered[,"STATE"], cex = 0.6, xlab = "Number of Shootings", ylab="", pch=19)
+
+spdf_fortified <- spdf_fortified %>% left_join(. , shootingsbystate, by="STATEABB")
+```
+
+```{r Q7_hexmap}
+png("outputdata/q7_shootings.png",units="in", width=8, height=5, res=300)
+ggplot() +
+  geom_polygon(data=spdf_fortified, aes(fill=NO_OF_PEOPLE_KILLED, x=long, y=lat, group=group), size=0, alpha=0.9) +
+  geom_text(data=centers, aes(x=x, y=y, label=id), color="white", size=3, fontface = "bold") +
+  theme_void() +
+  scale_fill_gradient(
+    labels = scales::dollar, na.value = "white", low="mistyrose", 
+    high="darkred", trans="log10", name="Total Police Shootings from Jan 1, 2013 to Dec 31, 2018", 
+    guide = guide_colourbar(direction = "horizontal", label.position = "bottom", title.position = 'top', nrow=1, barheight = unit(5, units = "mm"), barwidth=unit(96, units = "mm"))
+    ) +
+  theme(
+    legend.position = c(0.5, 0.9),
+    text = element_text(color = "#22211d"),
+    plot.background = element_rect(fill = "white", color = NA), 
+    panel.background = element_rect(fill = "grey95", color = NA), 
+    legend.background = element_rect(fill = "grey95", color = NA),
+    plot.title = element_text(size= 22, hjust=0.5, color = "#4e4d47", margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm"))) +
+  coord_map() # somehow fixes the hexagons
+dev.off()
+```
+
+```{r Q7_scatter}
+# look at the scatter plot and the correlation
+# add the total value to the shooting data
+shootingsbystate <- merge(shootingsbystate, totalsbystate[,c("STATEABB","TOTALVALUE")], by="STATEABB")
+
+# let's scatter plot to see if there's a relationship
+png("outputdata/q7_scatter_shootings_value.png",units="in", width=16, height=10, res=300)
+plot(shootingsbystate$NO_OF_PEOPLE_KILLED, shootingsbystate$TOTALVALUE/1e6, xlab="Total Number of Shootings From Jan 1, 2013 to Dec 31, 2018", ylab="Total Police Acquisitions (M$)")
+text(shootingsbystate$NO_OF_PEOPLE_KILLED, shootingsbystate$TOTALVALUE/1e6, labels = shootingsbystate$STATEABB, pos = 4)
+linearmodel <- lm(shootingsbystate$TOTALVALUE/1e6~shootingsbystate$NO_OF_PEOPLE_KILLED)
+abline(linearmodel, col="red")
+coefs <- coef(linearmodel)
+b0 <- round(coefs[1], 2)
+b1 <- round(coefs[2],2)
+r2 <- round(summary(linearmodel)$r.squared, 2)
+mylabel <- bquote(italic(y) == .(b0) + .(b1)*italic(x)* ","  ~~ italic(r)^2 == .(r2))
+text(x = 800, y = 0, labels = mylabel, pos=4, col="red")
+dev.off()
+
+# let's try with log y axis
+png("outputdata/q7_scatter_shootings_value_logy.png",units="in", width=16, height=10, res=300)
+plot(shootingsbystate$NO_OF_PEOPLE_KILLED, shootingsbystate$TOTALVALUE/1e6, xlab="Total Number of Shootings From Jan 1, 2013 to Dec 31, 2018", ylab="Total Police Acquisitions (M$)", log='y', panel.first=c(abline(h=c(seq(1e-1, 1e+1, 1), seq(1e+1, 1e+3, 1e+2)), lty=3, col="grey"),abline(v=seq(0,1,0.2), lty=3, col="grey")))
+text(shootingsbystate$NO_OF_PEOPLE_KILLED, shootingsbystate$TOTALVALUE/1e6, labels = shootingsbystate$STATEABB, pos = 4)
+linearmodel <- lm(shootingsbystate$TOTALVALUE/1e6~shootingsbystate$NO_OF_PEOPLE_KILLED)
+abline(linearmodel, untf=TRUE, col="red")
+coefs <- coef(linearmodel)
+b0 <- round(coefs[1], 2)
+b1 <- round(coefs[2],2)
+r2 <- round(summary(linearmodel)$r.squared, 2)
+mylabel <- bquote(italic(y) == .(b0) + .(b1)*italic(x)* ","  ~~ italic(r)^2 == .(r2))
+text(x = 800, y = 2, labels = mylabel, pos=4, col="red")
+dev.off()
+
+# now let's try log transforming the data
+png("outputdata/q7_scatter_shootings_logvalue.png",units="in", width=16, height=10, res=300)
+plot(shootingsbystate$NO_OF_PEOPLE_KILLED, log(shootingsbystate$TOTALVALUE/1e6), xlab="Total Number of Shootings From Jan 1, 2013 to Dec 31, 2018", ylab="log(Total Police Acquisitions (M$))")
+text(shootingsbystate$NO_OF_PEOPLE_KILLED, log(shootingsbystate$TOTALVALUE/1e6), labels = shootingsbystate$STATEABB, pos = 4)
+linearmodel <- lm(log(shootingsbystate$TOTALVALUE/1e6)~shootingsbystate$NO_OF_PEOPLE_KILLED)
+abline(linearmodel, col="red")
+coefs <- coef(linearmodel)
+b0 <- round(coefs[1], 2)
+b1 <- round(coefs[2],2)
+r2 <- round(summary(linearmodel)$r.squared, 2)
+mylabel <- bquote("log(" *italic(y)* ")" == .(b0) + .(b1)*italic(x)* ","  ~~ italic(r)^2 == .(r2))
+text(x = 800, y = 1, labels = mylabel, pos=4, col="red")
+dev.off()
+```
+
+## 4.8 What is happening over time?
+```{r Q8_timeseries}
+head(shootings)
+min(shootings$DATE)
+max(shootings$DATE)
+shootings <- shootings[order(shootings$DATE),]
+shootings$SUM_DEATHS <- 1:nrow(shootings)
+
+head(purchases)
+min(purchases$SHIPDATE)
+max(purchases$SHIPDATE)
+purchases <- purchases[order(purchases$SHIPDATE),]
+purchases$SUM_VALUE <- cumsum(purchases$TOTALVALUE)
+
+# join the purchases and shootings tables based on date 
+timeseries <- merge(purchases[, c("SHIPDATE", "SUM_VALUE")], shootings[, c("DATE", "SUM_DEATHS")], by.x="SHIPDATE", by.y="DATE", all=TRUE)
+timeseries <- na.omit(timeseries)
+
+ggplot(data = shootings, aes(x = DATE, y = SUM_DEATHS))+
+  geom_line(color = "#00AFBB", size = 2) +
+  scale_x_date(date_labels = "%b, %Y") + xlab("") + ylab("Cumulative Shootings")
+
+ggplot() + 
+  geom_line(data = purchases, aes(x = SHIPDATE, y = SUM_VALUE/1e6), color = "red") +
+  geom_line(data = purchases, aes(x = SHIPDATE, y = TOTALVALUE/1e6), color = "blue") +
+  xlab('') +
+  ylab('Cumulative Value and Value (M$)')
+
+ggplot() + 
+  geom_line(data = timeseries, aes(x = SHIPDATE, y = SUM_DEATHS), color = "red") +
+  geom_line(data = timeseries, aes(x = SHIPDATE, y = SUM_VALUE), color = "blue") +
+  xlab('') +
+  ylab('Cumulative Value and Value (M$)')
+```
+
+## 4.9 Is the claim that smaller police stations get more help true or false? 
+```{r Q9}
+# bring in BB's city datasets
+city <- read.csv("intdata/from bb/simplified us city file.csv")
+# make the zeros a small number so that we can use the log transformation
+city[city$TOTAL_COST==0, "TOTAL_COST"] <- 1
+city$BUDGET_2017M <- city$BUDGET_2017/1e6
+city$TOTAL_COSTM <- city$TOTAL_COST/1e6
+city$LOGBUDGET_2017M <- log(city$BUDGET_2017/1e6)
+city$LOGTOTAL_COSTM <- log(city$TOTAL_COST/1e6)
+
+png("outputdata/q9_scatter_value_budget.png",units="in", width=16, height=10, res=300)
+plot(city$BUDGET_2017M, city$TOTAL_COSTM, xlab="City Budget (M$)", ylab="Total Police Acquisitions (M$)", xlim=c(0,5.5e3))
+text(city$BUDGET_2017M, city$TOTAL_COSTM, labels = city$CITY, pos = 4)
+linearmodel <- lm(TOTAL_COSTM~BUDGET_2017M, data=city)
+abline(linearmodel, col="red")
+coefs <- coef(linearmodel)
+b0 <- round(coefs[1], 2)
+b1 <- round(coefs[2],2)
+r2 <- round(summary(linearmodel)$r.squared, 2)
+mylabel <- bquote(italic(y) == .(b0) + .(b1)*italic(x)* ","  ~~ italic(r)^2 == .(r2))
+text(x = 4.8e3, y = 12, labels = mylabel, pos=4, col="red")
+dev.off()
+
+png("outputdata/q9_scatter_logvalue_budget.png",units="in", width=16, height=10, res=300)
+plot(city$LOGBUDGET_2017M, city$LOGTOTAL_COSTM, xlab="log(City Budget (M$))", ylab="log(Total Police Acquisitions (M$))", xlim=c(2, 12))
+text(city$LOGBUDGET_2017M, city$LOGTOTAL_COSTM, labels = city$CITY, pos = 4)
+linearmodel <- lm(LOGTOTAL_COSTM~LOGBUDGET_2017M, data=city)
+abline(linearmodel, col="red")
+coefs <- coef(linearmodel)
+b0 <- round(coefs[1], 2)
+b1 <- round(coefs[2],2)
+r2 <- round(summary(linearmodel)$r.squared, 2)
+mylabel <- bquote("log(" *italic(y)* ")" == .(b0) + .(b1) ~"log(" *italic(x)* "),"  ~~ italic(r)^2 == .(r2))
+text(x = 10, y = 2, labels = mylabel, pos=4, col="red")
+dev.off()
+```
+
+
