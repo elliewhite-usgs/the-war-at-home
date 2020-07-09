@@ -2,7 +2,7 @@
 
 Total Police Acquisition   |  Total Police Shootings
 :-------------------------:|:-------------------------:
-![Total Police Acquisition](https://github.com/whiteellie/police-militarization/blob/master/outputdata/q1_value.png) |  ![Total Police Shootings](https://github.com/whiteellie/police-militarization/blob/master/outputdata/q7_shootings.png)
+![Total Police Acquisition](https://github.com/whiteellie/police-militarization/blob/master/q1_value_states_hexbin.png) |  ![Total Police Shootings](https://github.com/whiteellie/police-militarization/blob/master/q7_shootings.png)
 
 
 # The 1033 program
