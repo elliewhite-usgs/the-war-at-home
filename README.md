@@ -31,16 +31,17 @@ According to the Law Enforcement Support Office (LESO)
 * Please contact white.elaheh@gmail.com for any comments, questions, and concerns.
 
 # Questions I want to answer
-* Q1. Which state aquired the most in value?
-* Q2. Which state aquired the most in value per capita?
+* Q1. Which states/counties/locations aquired the most in value?
+* Q2. Which states aquired the most in value per capita?
 * Q3. Are the acquizitions hapenning in places with more people of color?
 * Q4. How many items did each state get?
-* Q5. What items was sent the most?
-* Q6. What items where each state getting?
-* Q7. Does the amount of acquizitions correlate with the number of police homocides?
+* Q5. What items were sent the most?
+* Q6. How much of each item where the states getting?
+* Q7. Does the amount of acquizitions in value correlate with the number of police homocides?
+* Q8. What is happening over time?
+* Q9. Is the claim that smaller police stations get more help true or false? 
 
 # Incomplete tasks 
-* cumulated value .gif by year
-* fix colors on plots
+* better geocoding so there is less data loss
 
 

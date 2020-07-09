@@ -777,7 +777,7 @@ quantity <- quantity[order(quantity$QUANTITY, decreasing=TRUE),]
 dotchart(quantity[20:1,2], labels = quantity[20:1,1], cex = 0.6, xlab = "Number of Items", ylab="", pch=19)
 ```
 
-## 4.6 What items where each state getting?
+## 4.6 How much of each item where the states getting?
 ```{r Q6}
 # data by item, theres a lot of them so this table is going to be wide
 totalsbyitem <- aggregate(QUANTITY~STATEABB+ITEM, purchases, sum)
