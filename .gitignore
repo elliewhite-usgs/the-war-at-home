@@ -6,6 +6,4 @@
 googleapikey.txt
 uscensuskey.txt
 citations.txt
-outputdata
-inputdata
-intdata
+in/*

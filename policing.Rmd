@@ -22,14 +22,7 @@ opts_chunk$set(
   collapse   = TRUE,
   tidy       = FALSE
 )
-
-# # create a .Rprofile file but only create if not already there
-# if(!file.exists("~/.Rprofile")){
-#   file.create("~/.Rprofile")    # (don't overwrite it)
-# } 
-# file.edit("~/.Rprofile")
 ```
-
 
 # Citations
 ```{r citations}
@@ -48,7 +41,6 @@ remove(x)
 remove(i)
 remove(citethese)
 ```
-
 
 # 1.0 Data Gathering
 ```{r data}
