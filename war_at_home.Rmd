@@ -1,0 +1,306 @@
+---
+title: "war at home"
+author: "Ellie White"
+date: "2023-06-19"
+output: html_document
+---
+
+Record of plotting police department purchases through the DOD 1033 program.
+
+# Contents
+1.0 Data Gathering
+2.0 State Summaries
+3.0 Geocoding
+4.0 Questions
+
+```{r, include=FALSE}
+library(knitr)
+library(formatR)
+opts_chunk$set(
+  fig.width  = 7.5,
+  fig.height = 7.5,
+  collapse   = TRUE,
+  tidy       = FALSE
+)
+```
+
+# Citations
+```{r citations}
+# cite R 
+toBibtex(citation())
+
+# cite packages
+citethese <- c("ggplot2", "viridis", "rgeos", "geojsonio", "maptools", "sp", "raster", "rgdal", "tidyverse", "lattice", "RColorBrewer", "Hmisc")
+
+for(i in seq_along(citethese)){
+  x <- citation(citethese[i])
+  print(toBibtex(x))
+}
+
+remove(x)
+remove(i)
+remove(citethese)
+```
+
+# 1.0 Data Gathering 
+```{r leso_fetch}
+# Law Enforcement Support Office is required by the FY16 NDAA to post property transfers as public information
+# downloaded on: 06/19/2023 
+# from: https://www.dla.mil/Disposition-Services/Offers/Law-Enforcement/Public-Information/
+# click on "ALASKA-WYOMING AND US TERITORIES"
+# file is called "AllStatesAndTerritoriesQTR2FY23.xlsx"
+# I put it in "1_fetch/"
+
+library(readxl)    
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+  # if you like tidyverse tibbles (the default with read_excel), then just pass tibble = TRUE
+  sheets <- readxl::excel_sheets(filename)
+  x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+  if(!tibble) x <- lapply(x, as.data.frame)
+  names(x) <- sheets
+  x
+}
+
+mysheets <- read_excel_allsheets("1_fetch/AllStatesAndTerritoriesQTR2FY23.xlsx")
+
+# collapse all sheets in one dataframe
+purchases <- do.call(rbind.data.frame, mysheets)
+remove(mysheets)
+```
+
+```{r leso_clean}
+# clean up rownames
+row.names(purchases) <- 1:nrow(purchases)
+
+# clean up the column names, here's my best guess at what they are: 
+# State: The state where the law enforcement agency is located.
+# Agency Name: The name of the law enforcement agency.
+# NSN: National Stock Number, a unique identifier for a specific item.
+# Item Name: The name or description of the item.
+# Quantity: The number of units of the item transferred.
+# UI: Unit of Issue, the measurement or packaging unit for the item.
+# Acquisition Value: The estimated value of the item at the time of acquisition.
+# DEMIL Code: Demilitarization Code, indicating the level of demilitarization required for the item.
+# DEMIL IC: Demilitarization Instructions Code, providing specific instructions for the demilitarization process.
+# Ship Date: The date when the item was shipped or transferred.
+# Station Type: Type of station or location associated with the transfer.
+    
+# colnames(purchases) <- make.names(colnames(purchases), unique = FALSE, allow_ = TRUE)
+colnames(purchases) <- c("state_abb", "agency_name", "nsn", "item_name", "quantity", "unit_of_issue", "acquisition_value", "demil_code", "demil_ic", "ship_date", "station_type")
+
+# label the variables in the dataframe for nice labels on plots
+library(Hmisc) 
+varlabels <- c("State Abbreviation", "Agency Name", "NSN", "Item Name", "Quantity", "Unit of Issue", "Acquisition Value", "Demilitarization Code", "Demilitarization Instructions Code", "Shipment Date", "Station Type")
+names(varlabels) <- names(purchases)
+label(purchases) <- lapply(names(varlabels), function(x) label(purchases[,x]) = varlabels[x])
+
+# fix date
+purchases$ship_date <- format(purchases$ship_date, "%Y-%m-%d")
+purchases$ship_date <- as.Date(purchases$ship_date, "%Y-%m-%d")
+
+# fix factors 
+purchases$state_abb <- factor(purchases$state_abb)
+purchases$unit_of_issue <- factor(purchases$unit_of_issue)
+purchases$demil_code <- factor(purchases$demil_code)
+purchases$demil_ic <- factor(purchases$demil_ic)
+purchases$station_type <- factor(purchases$station_type)
+
+str(purchases)
+```
+
+```{r leso_add}
+# find total value
+purchases$total_value <- purchases$acquisition_value*purchases$quantity
+```
+
+# 2.0 State Summaries 
+```{r state_summary_table}
+library(tidyverse)
+purchases_states <- purchases |>
+  group_by(state_abb) |>
+  summarize(sum_value = sum(total_value),
+            num_records = n())
+
+# add in proper state + teritory names 
+st_crosswalk <- tibble(state_name = state.name) %>%
+ bind_cols(tibble(state_abb = state.abb)) %>% 
+ bind_rows(tibble(state_name = c("District of Columbia", "Northern Mariana Islands", "Guam", "Virgin Islands", "Puerto Rico"),
+                  state_abb = c("DC", "MP", "GU", "VI", "PR")))
+ 
+purchases_states <- left_join(purchases_states, st_crosswalk, by = "state_abb")
+```
+
+```{r census}
+# add in population data with `tidycensus`
+# users of this package will need to request an API key. Go to http://api.census.gov/data/key_signup.html to register. Copy this token to your clipboard and add it to your .Renviron file. Create a line like this: CENSUS_TOKEN=[INSERT YOUR TOKEN]. Restart R and see if it worked with:
+# Sys.getenv("CENSUS_TOKEN")
+
+library(tidycensus)
+# only have to do this once per session
+# census_api_key(Sys.getenv("CENSUS_TOKEN"), install = TRUE)
+
+# 2020 Decennial Census Variables
+decennial_2020_vars <- load_variables(year = 2020, dataset = "pl", cache = TRUE)
+
+# 2016 - 2020 5 Year American Community Survey (ACS) Variables
+# acs_20_vars = load_variables(year = 2020, dataset = "acs5", cache = TRUE)
+
+state_populations <- get_decennial(
+  geography = "state",
+  variables = "P1_001N",
+  year = 2020,
+  sumfile = "pl") |>
+  select(-variable) |>
+  rename(population = value)
+
+# add in teritory populations too! Guam, Virgin Islands, and Northern Mariana Islands are missing, manually added in from here: 
+# https://www.census.gov/library/stories/2021/10/first-2020-census-united-states-island-areas-data-released-today.html
+# retrieved on 06/19/2023
+state_populations <- state_populations |>
+  bind_rows(tibble(GEOID = c(NA, NA, NA), 
+                   NAME = c("Northern Mariana Islands", "Virgin Islands", "Guam"), 
+                   population = c(47329, 87146, 153836)))
+```
+
+```{r join_state_pop}
+# join in with purchase data
+purchases_states <- left_join(purchases_states, state_populations, by = c("state_name" = "NAME"))
+```
+
+## 2.1 Hexbin Map
+This may be a better visual tool, used code from tutorial at: https://www.r-graph-gallery.com/328-hexbin-map-of-the-usa/
+```{r base_hexbinmap} 
+# Hexbin download available in the geojson format here: https://team.carto.com/u/andrew/tables/andrew.us_states_hexgrid/public/map. download it and then bring it in
+library(geojsonio)
+spdf <- geojson_read("1_fetch/us_states_hexgrid.geojson",  what = "sp")
+ 
+# need to 'fortify' the data to be able to show it with ggplot2 (we need a data frame format)
+library(broom)
+spdf@data <- spdf@data %>% mutate(google_name = gsub(" \\(United States\\)", "", google_name))
+spdf_fortified <- tidy(spdf, region = "google_name")
+
+# calculate the centroid of each hexagon to add the label
+library(rgeos)
+centers <- cbind.data.frame(data.frame(gCentroid(spdf, byid=TRUE), id=spdf@data$iso3166_2))
+
+# now I can plot this shape easily as described before
+ggplot() +
+  geom_polygon(data = spdf_fortified, aes( x = long, y = lat, group = group), fill="skyblue", color="white") +
+  geom_text(data = centers, aes(x = x, y = y, label = id)) +
+  theme_void() +
+  coord_map()
+
+# merge geospatial and numerical information
+spdf_fortified <- spdf_fortified |>
+  left_join(purchases_states, by = c("id" = "state_name")) 
+
+# NAs were introduced because of district of columbia, let's just drop them for now
+spdf_fortified <- na.omit(spdf_fortified)
+ 
+# Make a first base chloropleth map
+ggplot() +
+  geom_polygon(data = spdf_fortified, 
+               aes(fill = sum_value, x = long, y = lat, group = group)) +
+  theme_void() +
+  coord_map()
+```
+
+```{r hexbin}
+# now customize
+
+# Q1. Who purchased the most in value? 
+ggplot() +
+  geom_polygon(data = spdf_fortified, 
+               aes(fill = sum_value/1e6, x = long, y = lat, group = group), linewidth = 0, alpha = 0.9) +
+  geom_text(data = centers, aes(x = x, y = y, label = id), color = "white", size = 3, fontface = "bold") +
+  theme_void() +
+  scale_fill_gradient(
+    labels = scales::dollar, na.value = "white", low="mistyrose", 
+    high="darkred", trans = "log10", name = "Total Acquisition Value (M$)", 
+    guide = guide_colourbar(direction = "horizontal", 
+                            label.position = "bottom", 
+                            title.position = 'top', 
+                            nrow = 1, 
+                            barheight = unit(5, units = "mm"), 
+                            barwidth=unit(60, units = "mm"))) +
+  theme(
+    legend.position = c(0.5, 0.9),
+    text = element_text(color = "#22211d"),
+    plot.background = element_rect(fill = "white", color = NA), 
+    panel.background = element_rect(fill = "grey95", color = NA), 
+    legend.background = element_rect(fill = "grey95", color = NA),
+    plot.title = element_text(size = 22, 
+                              hjust = 0.5, 
+                              color = "#4e4d47", 
+                              margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm"))) +
+  coord_map() # somehow fixes the hexagons
+ggsave("2_visualize/q1_value_states_hexbin.png", units = "in", width = 16, height = 9)
+
+# Q2. Who purchased the most in value per capita?
+ggplot() +
+  geom_polygon(data = spdf_fortified, 
+               aes(fill = sum_value/1e6/population, x = long, y = lat, group = group), linewidth = 0, alpha = 0.9) +
+  geom_text(data = centers, aes(x = x, y = y, label = id), color = "white", size = 3, fontface = "bold") +
+  theme_void() +
+  scale_fill_gradient(
+    labels = scales::dollar, na.value = "white", low="mistyrose", 
+    high="darkred", trans = "log10", name = "Total Per Capita Acquisition Value (M$)", 
+    guide = guide_colourbar(direction = "horizontal", label.position = "bottom", title.position = 'top', nrow=1, barheight = unit(5, units = "mm"), barwidth=unit(70, units = "mm"))) +
+  theme(
+    legend.position = c(0.5, 0.9),
+    text = element_text(color = "#22211d"),
+    plot.background = element_rect(fill = "white", color = NA), 
+    panel.background = element_rect(fill = "grey95", color = NA), 
+    legend.background = element_rect(fill = "grey95", color = NA),
+    plot.title = element_text(size= 22, hjust=0.5, color = "#4e4d47", margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm"))) +
+  coord_map() # somehow fixes the hexagons
+ggsave("2_visualize/q2_value_per_cap.png", units = "in", width = 16, height = 9)
+
+# Q3. Who made the most requests?
+ggplot() +
+  geom_polygon(data = spdf_fortified, 
+               aes(fill = num_records, x = long, y = lat, group = group), linewidth = 0, alpha = 0.9) +
+  geom_text(data = centers, aes(x = x, y = y, label = id), color = "white", size = 3, fontface = "bold") +
+  theme_void() +
+  scale_fill_gradient(na.value = "white", low="mistyrose", 
+    high="darkred", name="Total Number of Records", 
+    guide = guide_colourbar(direction = "horizontal", 
+                            label.position = "bottom", 
+                            title.position = 'top', 
+                            nrow = 1, 
+                            barheight = unit(5, units = "mm"), 
+                            barwidth=unit(60, units = "mm"))) +
+  theme(
+    legend.position = c(0.5, 0.9),
+    text = element_text(color = "#22211d"),
+    plot.background = element_rect(fill = "white", color = NA), 
+    panel.background = element_rect(fill = "grey95", color = NA), 
+    legend.background = element_rect(fill = "grey95", color = NA),
+    plot.title = element_text(size= 22, hjust=0.5, color = "#4e4d47", margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm"))) +
+  coord_map() # somehow fixes the hexagons
+ggsave("2_visualize/q3_records.png", units = "in", width = 16, height = 9)
+```
+
+```{r timeseries}
+# Q4. What is happening over time?
+timeseries <- purchases |>
+  group_by(state_abb, ship_date) |>
+  summarize(daily_sum_value = sum(total_value)) |>
+  arrange(state_abb, ship_date) |>
+  mutate(cumulative_daily_sum_value = cumsum(daily_sum_value), 
+         label = if_else(ship_date == max(ship_date), state_abb, NA_character_))
+
+library(ggrepel)
+ggplot(data = timeseries, aes(x = ship_date, y = cumulative_daily_sum_value/1e6, color = state_abb)) +
+  geom_line() +
+  xlab('') +
+  ylab('Cumulative Acquisition Value (M$)') +
+  geom_label_repel(aes(label = label), nudge_x = 1, na.rm = TRUE) +
+  theme_bw() +
+  theme(legend.position = "none")
+ggsave("2_visualize/q4_timeseries.png", units = "in", width = 16, height = 9)
+```
+
+# 3.0 Geocoding
+
+
